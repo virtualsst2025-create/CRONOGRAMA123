@@ -1,0 +1,1423 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cronograma de Capacitaciones</title>
+    <!-- Carga de Tailwind CSS para un diseño moderno y responsive -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Estilos Base y Hover */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .card {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        /* Color principal */
+        .btn-primary {
+            background-color: #10b981; /* Esmeralda 500 */
+            color: white;
+        }
+        .btn-primary:hover {
+            background-color: #059669; /* Esmeralda 600 */
+        }
+
+        /* Estilos de Modal Reutilizables */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: white;
+            padding: 2rem;
+            border-radius: 0.75rem;
+            max-width: 95%;
+            width: 700px; /* Aumentado para la lista de sugerencias */
+            max-height: 90vh;
+            overflow-y: auto;
+            transform: scale(0.9);
+            opacity: 0;
+            transition: all 0.3s ease-in-out;
+        }
+        .modal-open .modal-content {
+            transform: scale(1);
+            opacity: 1;
+        }
+        
+        /* Estilo para tabla de cronograma y sugerencias */
+        .schedule-table th, .schedule-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        /* Estilo para el sub-modal de gestión */
+        .sub-modal-content {
+            background-color: #f9f9f9;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+            max-height: 70vh;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+        }
+    </style>
+    
+    <!-- Módulos de Firebase para la lógica asíncrona -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, doc, setLogLevel, addDoc, updateDoc, deleteDoc, increment } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Exponer módulos de Firebase al ámbito global (window)
+        window.initializeApp = initializeApp;
+        window.getAuth = getAuth;
+        window.signInAnonymously = signInAnonymously;
+        window.signInWithCustomToken = signInWithCustomToken;
+        window.onAuthStateChanged = onAuthStateChanged;
+        window.getFirestore = getFirestore;
+        window.doc = doc;
+        window.collection = collection;
+        window.onSnapshot = onSnapshot;
+        window.setLogLevel = setLogLevel;
+        window.addDoc = addDoc;
+        window.updateDoc = updateDoc;
+        window.deleteDoc = deleteDoc;
+        window.increment = increment;
+    </script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        inter: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        'primary': '#10b981', /* Esmeralda 500 */
+                    }
+                }
+            }
+        }
+
+        // === FIREBASE SETUP & GLOBAL STATE ===
+        
+        // Global state variables for Firebase access and data
+        let db;
+        let auth;
+        let userId = null;
+        let capacitaciones = []; // Datos cargados en tiempo real desde Firestore
+        let sugerencias = []; // Datos cargados en tiempo real desde Firestore
+        let isAuthReady = false;
+
+        // Global Firebase setup variables (provided by canvas environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Firestore paths (Usando colecciones públicas para datos compartidos)
+        const COURSES_PATH = `artifacts/${appId}/public/data/capacitaciones`;
+        const SUGGESTIONS_PATH = `artifacts/${appId}/public/data/sugerencias`;
+
+        // CLAVE DE ACCESO PARA ADMINISTRACIÓN Y SUGERENCIAS
+        const ADMIN_KEY = "admin2024";
+
+        // Variable global para mantener el ID del curso que se está editando
+        let cursoIdEnEdicion = null; 
+        
+        
+        /**
+         * Inicializa Firebase, autentica y establece los listeners de datos.
+         */
+        async function initFirebaseAndAuth() {
+            try {
+                if (!firebaseConfig || !firebaseConfig.apiKey) {
+                    console.error("Firebase config is missing or invalid.");
+                    handleAction('Error Fatal', 'Configuración de base de datos no válida.');
+                    return;
+                }
+                
+                const app = window.initializeApp(firebaseConfig);
+                db = window.getFirestore(app);
+                auth = window.getAuth(app);
+                
+                // window.setLogLevel('debug'); // Descomentar para debug
+                
+                // 1. Autenticación
+                await new Promise(resolve => {
+                    window.onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                        } else {
+                            if (initialAuthToken) {
+                                await window.signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await window.signInAnonymously(auth);
+                            }
+                            // onAuthStateChanged se disparará de nuevo con el usuario autenticado/anónimo
+                            return; 
+                        }
+                        isAuthReady = true;
+                        resolve();
+                    });
+                });
+
+                // 2. Setup Listeners
+                setupCapacitacionesListener();
+                setupSugerenciasListener();
+                
+                handleAction('Sistema Listo', 'Base de datos conectada.');
+                renderCapacitaciones(); // Renderizado inicial (se actualizará con el listener)
+
+            } catch (error) {
+                console.error("Error inicializando Firebase:", error);
+                handleAction('Error Fatal', 'No se pudo conectar con la base de datos: ' + error.message);
+            }
+        }
+        
+        /**
+         * Listener en tiempo real para las capacitaciones.
+         */
+        function setupCapacitacionesListener() {
+            const q = window.collection(db, COURSES_PATH);
+            window.onSnapshot(q, (snapshot) => {
+                capacitaciones = snapshot.docs.map(doc => ({
+                    ...doc.data(),
+                    id: doc.id // Usar el ID del documento de Firestore
+                }));
+                console.log("Capacitaciones actualizadas:", capacitaciones.length);
+                
+                // Ordenar por nombre (ejemplo) antes de renderizar
+                capacitaciones.sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+                renderCapacitaciones();
+                // Si el modal de gestión está abierto, re-renderizarlo
+                if (!document.getElementById('gestionCursosModal').classList.contains('hidden')) {
+                    renderGestionCursos();
+                }
+            }, (error) => {
+                console.error("Error al escuchar capacitaciones:", error);
+                handleAction('Error de Conexión', 'Fallo al obtener datos de capacitaciones.');
+            });
+        }
+        
+        /**
+         * Listener en tiempo real para las sugerencias.
+         */
+        function setupSugerenciasListener() {
+             const q = window.collection(db, SUGGESTIONS_PATH);
+            window.onSnapshot(q, (snapshot) => {
+                sugerencias = snapshot.docs.map(doc => ({
+                    ...doc.data(),
+                    id: doc.id // Usar el ID del documento de Firestore
+                }));
+                console.log("Sugerencias actualizadas:", sugerencias.length);
+                // Si el modal de sugerencias está abierto, re-renderizarlo
+                 if (!document.getElementById('listaSugerenciasModal').classList.contains('hidden')) {
+                    renderSugerencias();
+                }
+            }, (error) => {
+                console.error("Error al escuchar sugerencias:", error);
+            });
+        }
+
+
+        /**
+         * Función genérica para abrir un modal.
+         * @param {string} modalId El ID del modal a abrir.
+         */
+        function abrirModal(modalId) {
+            const modal = document.getElementById(modalId);
+            modal.classList.remove('hidden');
+            setTimeout(() => modal.classList.add('modal-open'), 10);
+        }
+
+        /**
+         * Función genérica para cerrar un modal.
+         * @param {string} modalId El ID del modal a cerrar.
+         */
+        function cerrarModal(modalId) {
+            const modal = document.getElementById(modalId);
+            modal.classList.remove('modal-open');
+            setTimeout(() => modal.classList.add('hidden'), 300);
+        }
+
+        /**
+         * Muestra un modal con los detalles completos de un curso.
+         * @param {string} cursoId El ID (Doc ID de Firestore) del curso a mostrar.
+         */
+        function mostrarDetalles(cursoId) {
+            const curso = capacitaciones.find(c => c.id === cursoId);
+            if (!curso) {
+                handleAction("Error", "Curso no encontrado o datos no cargados.");
+                return;
+            }
+
+            const cupoDisponible = curso.cupoMax - curso.cupoActual;
+            const estaLleno = cupoDisponible <= 0;
+
+            // Llenar el modal de detalles
+            document.getElementById('modalTitulo').textContent = curso.nombre;
+            document.getElementById('modalArea').textContent = curso.area;
+            document.getElementById('modalDuracion').textContent = curso.duracion;
+            document.getElementById('modalInstructor').textContent = curso.instructor;
+            document.getElementById('modalDescripcion').textContent = curso.descripcion;
+            document.getElementById('modalFechaInicio').textContent = curso.fechaInicio;
+            
+            // LÓGICA DE CUPO EN MODAL DE DETALLES
+            document.getElementById('modalCupoTotal').textContent = curso.cupoMax;
+            document.getElementById('modalCupoDisponible').innerHTML = estaLleno 
+                ? `<span class="text-red-600 font-bold">AGOTADO (${curso.cupoMax})</span>`
+                : `${cupoDisponible} de ${curso.cupoMax}`;
+            
+            // Configurar el botón de inscripción del modal de detalles
+            const inscModalBtn = document.getElementById('inscModalBtn');
+            if (estaLleno || curso.estado !== "Inscripción Abierta") {
+                inscModalBtn.textContent = 'No Disponible';
+                inscModalBtn.disabled = true;
+                inscModalBtn.classList.add('bg-gray-400', 'cursor-not-allowed');
+                inscModalBtn.classList.remove('btn-primary', 'hover:bg-indigo-700');
+                inscModalBtn.onclick = () => handleAction('Cupo Lleno', curso.nombre);
+            } else {
+                inscModalBtn.textContent = 'Inscribirse Ahora';
+                inscModalBtn.disabled = false;
+                inscModalBtn.classList.add('btn-primary', 'hover:bg-indigo-700');
+                inscModalBtn.classList.remove('bg-gray-400', 'cursor-not-allowed');
+                inscModalBtn.onclick = () => {
+                    cerrarModal('detallesModal');
+                    mostrarInscripcion(curso.id);
+                };
+            }
+
+            abrirModal('detallesModal');
+        }
+
+        /**
+         * Abre el modal de Inscripción y preselecciona un curso si se proporciona un ID.
+         * Solo muestra cursos que están publicados y que tienen cupo.
+         * @param {string | null} preselectedCursoId ID (Doc ID de Firestore) del curso a preseleccionar.
+         */
+        function mostrarInscripcion(preselectedCursoId = null) {
+            const select = document.getElementById('cursoSelect');
+            select.innerHTML = '<option value="" disabled selected>Selecciona un curso</option>'; // Reset
+
+            // Filtrar cursos que están Abiertos, Publicados Y que tienen cupo disponible
+            capacitaciones.filter(c => 
+                c.publicado && c.estado === "Inscripción Abierta" && (c.cupoMax - c.cupoActual) > 0
+            ).forEach(curso => {
+                const cupoDisponible = curso.cupoMax - curso.cupoActual;
+                const option = document.createElement('option');
+                option.value = curso.id;
+                // Mostrar cuántos cupos quedan en el select
+                option.textContent = `${curso.nombre} (${cupoDisponible} cupos restantes)`;
+                if (preselectedCursoId === curso.id) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
+            
+            // Solo abrir el modal si hay cursos disponibles para inscripción
+            if (select.children.length > 1) { 
+                abrirModal('inscripcionModal');
+            } else {
+                 handleAction('Error', 'No hay cursos con inscripción abierta y cupo disponible.');
+            }
+        }
+
+        /**
+         * Abre el modal del cronograma y lo llena dinámicamente.
+         */
+        function mostrarCronograma() {
+            const tbody = document.getElementById('cronogramaBody');
+            tbody.innerHTML = '';
+            
+            // Solo mostrar cursos publicados en el cronograma público
+            capacitaciones.filter(c => c.publicado).forEach(curso => {
+                const row = document.createElement('tr');
+                row.classList.add('hover:bg-gray-50');
+                row.innerHTML = `
+                    <td class="text-sm font-medium text-gray-800">${curso.nombre}</td>
+                    <td class="text-sm text-gray-600">${curso.horario}</td>
+                    <td class="text-sm text-gray-600">${curso.fechaInicio}</td>
+                    <td class="text-sm text-gray-600">${curso.instructor}</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            abrirModal('cronogramaModal');
+        }
+
+        function mostrarFormularioSugerencia() {
+            abrirModal('sugerenciaModal');
+        }
+
+        function mostrarListaSugerenciasAdmin() {
+            renderSugerencias();
+            abrirModal('listaSugerenciasModal');
+        }
+
+        function renderSugerencias() {
+            const container = document.getElementById('sugerenciasList');
+            container.innerHTML = ''; 
+
+            if (sugerencias.length === 0) {
+                container.innerHTML = '<p class="text-center py-6 text-gray-500">No hay sugerencias en el sistema.</p>';
+                return;
+            }
+
+            sugerencias.forEach(sug => {
+                const isCompleted = sug.estado === "Tomada en Cuenta";
+                const estadoClass = isCompleted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800';
+                
+                const sugHtml = `
+                    <li class="p-4 border-b last:border-b-0 flex flex-col md:flex-row justify-between items-start md:items-center ${isCompleted ? 'bg-gray-50 opacity-75' : 'bg-white'}">
+                        <div class="mb-2 md:mb-0 md:w-3/5">
+                            <p class="font-semibold text-gray-800">${sug.tema}</p>
+                            <p class="text-xs text-gray-500 mt-1">Sugerido el: ${sug.fecha}</p>
+                        </div>
+                        <div class="flex items-center gap-3 w-full md:w-2/5 md:justify-end">
+                            <span class="px-3 py-1 text-xs font-medium rounded-full ${estadoClass} whitespace-nowrap">
+                                ${sug.estado}
+                            </span>
+                            ${!isCompleted ? 
+                                `<button onclick="marcarSugerencia('${sug.id}')" class="px-3 py-1 text-xs font-medium rounded-lg bg-green-500 text-white hover:bg-green-600 transition duration-150">
+                                    Tomar en Cuenta
+                                </button>` 
+                                : ''
+                            }
+                            <button onclick="eliminarSugerencia('${sug.id}')" class="text-red-500 hover:text-red-700 transition duration-150 p-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                            </button>
+                        </div>
+                    </li>
+                `;
+                container.innerHTML += sugHtml;
+            });
+        }
+
+
+        function prepareAdminForm() {
+            const today = new Date();
+            const formattedDate = today.toISOString().split('T')[0]; 
+            document.getElementById('nuevoFechaInicio').value = formattedDate;
+            
+            const hours = String(today.getHours()).padStart(2, '0');
+            const minutes = String(today.getMinutes()).padStart(2, '0');
+            document.getElementById('nuevoHoraInicio').value = `${hours}:${minutes}`;
+        }
+
+
+        function solicitarClaveAdmin() {
+            const claveInput = document.getElementById('adminKeyInput');
+            abrirModal('keyModalAdmin');
+            claveInput.value = '';
+            document.getElementById('adminKeyErrorAdmin').classList.add('hidden');
+        }
+
+        function solicitarClaveSugerencia() {
+            const claveInput = document.getElementById('sugKeyInput');
+            abrirModal('keyModalSugerencia');
+            claveInput.value = '';
+            document.getElementById('adminKeyErrorSug').classList.add('hidden');
+        }
+
+        function verificarClaveAdmin(event) {
+            event.preventDefault();
+            const claveIngresada = document.getElementById('adminKeyInput').value;
+            const errorMessage = document.getElementById('adminKeyErrorAdmin');
+
+            if (claveIngresada === ADMIN_KEY) {
+                cerrarModal('keyModalAdmin');
+                prepareAdminForm(); 
+                abrirModal('adminModal'); 
+                errorMessage.classList.add('hidden');
+                handleAction('Acceso Concedido', 'Panel de Administración de Cursos');
+            } else {
+                errorMessage.classList.remove('hidden');
+                errorMessage.textContent = 'Clave incorrecta. Intente de nuevo.';
+                handleAction('Acceso Denegado', 'Panel de Administración de Cursos');
+            }
+        }
+
+        function verificarClaveSugerencia(event) {
+            event.preventDefault();
+            const claveIngresada = document.getElementById('sugKeyInput').value;
+            const errorMessage = document.getElementById('adminKeyErrorSug');
+
+            if (claveIngresada === ADMIN_KEY) {
+                cerrarModal('keyModalSugerencia');
+                mostrarListaSugerenciasAdmin();
+                errorMessage.classList.add('hidden');
+                handleAction('Acceso Concedido', 'Lista de Sugerencias');
+            } else {
+                errorMessage.classList.remove('hidden');
+                errorMessage.textContent = 'Clave incorrecta. Intente de nuevo.';
+                handleAction('Acceso Denegado', 'Lista de Sugerencias');
+            }
+        }
+
+
+        function handleAction(accion, curso) {
+            const messageBox = document.getElementById('messageBox');
+            let isError = accion.includes('Error') || accion.includes('Denegado') || accion.includes('Cancelado');
+            
+            messageBox.textContent = `Acción ejecutada: ${accion} para el curso/tema "${curso}".`;
+            
+            messageBox.classList.remove('hidden', 'bg-red-100', 'border-red-400', 'text-red-700', 'bg-green-100', 'border-green-400', 'text-green-700');
+
+            if (isError) {
+                messageBox.classList.add('bg-red-100', 'border-red-400', 'text-red-700');
+            } else {
+                messageBox.classList.add('bg-green-100', 'border-green-400', 'text-green-700');
+            }
+
+            messageBox.classList.add('opacity-100');
+            
+            // Ocultar el mensaje después de 4 segundos
+            setTimeout(() => {
+                messageBox.classList.add('hidden');
+                messageBox.classList.remove('opacity-100');
+            }, 4000);
+        }
+
+        async function handleSubmitInscripcion(event) {
+            event.preventDefault();
+            const nombre = document.getElementById('nombreInput').value;
+            const cedula = document.getElementById('cedulaInput').value;
+            const cursoId = document.getElementById('cursoSelect').value; // Ahora es Doc ID string
+            
+            const curso = capacitaciones.find(c => c.id === cursoId);
+
+            if (!curso || !db) {
+                 handleAction('Error de Sistema', 'Curso no válido o DB no conectada.');
+                 return;
+            }
+
+            const cupoDisponible = curso.cupoMax - curso.cupoActual;
+
+            if (cupoDisponible <= 0 || curso.estado !== "Inscripción Abierta") {
+                 cerrarModal('inscripcionModal');
+                 handleAction('Error de Inscripción', `El curso "${curso.nombre}" no está disponible para inscripción.`);
+                 return;
+            }
+            
+            const cursoRef = window.doc(db, COURSES_PATH, curso.id);
+
+            try {
+                // SIMULACIÓN DE INSCRIPCIÓN: Incrementar el cupo actual en Firestore
+                await window.updateDoc(cursoRef, {
+                    cupoActual: window.increment(1)
+                });
+
+                cerrarModal('inscripcionModal');
+                handleAction('Inscripción Exitosa', curso.nombre + ' (' + nombre + '/' + cedula + ')');
+                // La re-renderización es manejada por el onSnapshot listener
+            } catch (error) {
+                 console.error("Error al inscribir:", error);
+                 handleAction('Error de Inscripción', `Fallo al actualizar el cupo de ${curso.nombre}.`);
+            }
+        }
+
+        async function handleSubmitSugerencia(event) {
+            event.preventDefault();
+            const tema = document.getElementById('sugerenciaTema').value;
+            
+            if (tema.trim() === "" || !db) {
+                handleAction('Error de Sugerencia', 'El tema no puede estar vacío o DB no conectada.');
+                return;
+            }
+            
+            const today = new Date();
+            // Formato de fecha para guardar en Firestore
+            const dateStr = `${today.getDate()}/${today.getMonth() + 1}/${today.getFullYear()}`;
+            
+            try {
+                await window.addDoc(window.collection(db, SUGGESTIONS_PATH), {
+                    tema: tema.trim(),
+                    fecha: dateStr,
+                    estado: "Pendiente"
+                });
+
+                cerrarModal('sugerenciaModal');
+                handleAction('Sugerencia de Capacitación enviada', tema);
+                document.getElementById('sugerenciaTema').value = "";
+                // La re-renderización es manejada por el onSnapshot listener
+
+            } catch (error) {
+                console.error("Error al enviar sugerencia:", error);
+                handleAction('Error de Sugerencia', 'Fallo al guardar la sugerencia.');
+            }
+        }
+
+        async function marcarSugerencia(id) {
+            const sug = sugerencias.find(s => s.id === id);
+            if (sug && db) {
+                try {
+                    const sugRef = window.doc(db, SUGGESTIONS_PATH, id);
+                    await window.updateDoc(sugRef, {
+                        estado: "Tomada en Cuenta"
+                    });
+                    handleAction('Sugerencia Marcada', sug.tema);
+                } catch (error) {
+                    console.error("Error al marcar sugerencia:", error);
+                    handleAction('Error al Marcar', `Fallo al actualizar el estado de ${sug.tema}.`);
+                }
+            }
+        }
+
+        async function eliminarSugerencia(id) {
+            const sug = sugerencias.find(s => s.id === id);
+            if (sug && db) {
+                if (confirm(`¿Está seguro de eliminar la sugerencia "${sug.tema}"?`)) {
+                    try {
+                        await window.deleteDoc(window.doc(db, SUGGESTIONS_PATH, id));
+                        handleAction('Sugerencia Eliminada', sug.tema);
+                    } catch (error) {
+                        console.error("Error al eliminar sugerencia:", error);
+                        handleAction('Error al Eliminar', `Fallo al eliminar ${sug.tema}.`);
+                    }
+                } else {
+                     handleAction('Cancelado', `Eliminación de sugerencia ${sug.tema}`);
+                }
+            }
+        }
+
+
+        async function handleSubmitNuevoCurso(event) {
+            event.preventDefault();
+            
+            const nombre = document.getElementById('nuevoNombre').value;
+            const area = document.getElementById('nuevoArea').value;
+            const duracionMinutos = parseInt(document.getElementById('nuevoDuracion').value);
+            const instructor = document.getElementById('nuevoInstructor').value;
+            const descripcion = document.getElementById('nuevoDescripcion').value;
+            const fechaInicioInput = document.getElementById('nuevoFechaInicio').value; 
+            const horaInicio = document.getElementById('nuevoHoraInicio').value; 
+            const frecuencia = document.getElementById('nuevaFrecuencia').value;
+            const cupoMax = parseInt(document.getElementById('nuevoCupoMax').value); 
+            const cupoActual = parseInt(document.getElementById('nuevoCupoActual').value); 
+            const estadoPublicacion = document.getElementById('nuevoPublicacion').value;
+            const estadoCurso = document.getElementById('nuevoEstado').value;
+
+
+            // --- LÓGICA DE FORMATO DE DATOS ---
+
+            let duracionStr;
+            if (duracionMinutos >= 60 && duracionMinutos % 60 === 0) {
+                duracionStr = `${duracionMinutos / 60} horas`;
+            } else {
+                duracionStr = `${duracionMinutos} minutos`;
+            }
+
+            const dateParts = fechaInicioInput.split('-'); 
+            const dateObj = new Date(dateParts[0], dateParts[1] - 1, dateParts[2]);
+            const displayDate = dateObj.toLocaleDateString('es-ES', { day: 'numeric', month: 'long' });
+            
+            const horarioStr = `${frecuencia}, ${horaInicio}`;
+            
+
+            // --- VALIDACIONES ---
+            if (cupoActual > cupoMax) {
+                handleAction('Error de Administración', 'Cupo actual no puede ser mayor que el cupo máximo.');
+                return;
+            }
+            if (duracionMinutos <= 0) {
+                 handleAction('Error de Administración', 'La duración debe ser al menos 10 minutos.');
+                 return;
+            }
+
+
+            // --- CREACIÓN DEL NUEVO CURSO EN FIRESTORE ---
+            const nuevoCursoData = {
+                nombre,
+                area,
+                duracion: duracionStr,
+                estado: estadoCurso, 
+                instructor,
+                descripcion,
+                fechaInicio: displayDate, 
+                horario: horarioStr, 
+                cupoMax, 
+                cupoActual,
+                publicado: estadoPublicacion === 'visible',
+            };
+
+            try {
+                await window.addDoc(window.collection(db, COURSES_PATH), nuevoCursoData);
+                
+                document.getElementById('nuevoCursoForm').reset();
+                cerrarModal('adminModal');
+                // La re-renderización es manejada por el onSnapshot listener
+                handleAction('Curso Agregado', nombre);
+
+            } catch (error) {
+                console.error("Error al agregar curso:", error);
+                handleAction('Error de Administración', `Fallo al guardar el curso ${nombre}.`);
+            }
+        }
+
+        /**
+         * Muestra el sub-modal de gestión de cursos (lista para editar/eliminar/ocultar).
+         */
+        function solicitarGestionCursos() {
+            cerrarModal('adminModal');
+            renderGestionCursos();
+            abrirModal('gestionCursosModal'); 
+        }
+
+        /**
+         * Renderiza la lista completa de cursos en el modal de gestión.
+         */
+        function renderGestionCursos() {
+            const container = document.getElementById('gestionCursosList');
+            container.innerHTML = '';
+            
+            if (capacitaciones.length === 0) {
+                container.innerHTML = '<p class="text-center py-6 text-gray-500">No hay cursos en el sistema.</p>';
+                return;
+            }
+
+            capacitaciones.forEach(curso => {
+                const isPublished = curso.publicado;
+                const statusColor = isPublished ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
+                
+                let estadoBadgeClass = 'bg-gray-100 text-gray-800';
+                if (curso.estado === 'Inscripción Abierta') estadoBadgeClass = 'bg-indigo-100 text-indigo-800';
+                if (curso.estado === 'En Curso') estadoBadgeClass = 'bg-blue-100 text-blue-800';
+                if (curso.estado === 'Finalizado') estadoBadgeClass = 'bg-yellow-100 text-yellow-800';
+
+
+                const cursoHtml = `
+                    <li class="p-3 border-b last:border-b-0 flex flex-wrap justify-between items-center bg-white hover:bg-gray-50 transition duration-150">
+                        <div class="mb-2 md:mb-0 w-full md:w-1/3">
+                            <p class="font-semibold text-gray-800">${curso.nombre}</p>
+                            <p class="text-xs text-gray-500">ID: ${curso.id} | Cupo: ${curso.cupoActual}/${curso.cupoMax}</p>
+                        </div>
+                        <div class="flex items-center gap-2 w-full md:w-2/3 md:justify-end">
+                            <span class="px-2 py-1 text-xs font-medium rounded-full ${estadoBadgeClass} whitespace-nowrap">
+                                ${curso.estado}
+                            </span>
+                             <span class="px-2 py-1 text-xs font-medium rounded-full ${statusColor} whitespace-nowrap">
+                                ${isPublished ? 'VISIBLE' : 'OCULTO'}
+                            </span>
+                            
+                            <button onclick="mostrarEdicionCurso('${curso.id}')" class="px-3 py-1 text-xs font-medium rounded-lg text-white bg-blue-500 hover:bg-blue-600 transition duration-150">
+                                Editar Estado
+                            </button>
+
+                            <button onclick="eliminarCurso('${curso.id}')" class="text-red-500 hover:text-red-700 transition duration-150 p-1 bg-gray-100 rounded">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                            </button>
+                        </div>
+                    </li>
+                `;
+                container.innerHTML += cursoHtml;
+            });
+        }
+        
+        /**
+         * Prepara y muestra el modal de edición de estado y visibilidad del curso.
+         * @param {string} id ID (Doc ID de Firestore) del curso a editar.
+         */
+        function mostrarEdicionCurso(id) {
+            const curso = capacitaciones.find(c => c.id === id);
+            if (!curso) return;
+
+            // Almacenar el ID globalmente
+            cursoIdEnEdicion = id;
+
+            // Llenar el modal de edición
+            document.getElementById('edicionCursoTitulo').textContent = `Editar: ${curso.nombre}`;
+            document.getElementById('edicionEstado').value = curso.estado;
+            document.getElementById('edicionPublicacion').value = curso.publicado ? 'visible' : 'oculto';
+
+            cerrarModal('gestionCursosModal');
+            abrirModal('edicionCursoModal');
+        }
+
+        /**
+         * Maneja el guardado de los cambios de estado y visibilidad en Firestore.
+         * @param {Event} event Evento de envío del formulario.
+         */
+        async function handleGuardarEdicion(event) {
+            event.preventDefault();
+            
+            const curso = capacitaciones.find(c => c.id === cursoIdEnEdicion);
+            if (!curso || !db) {
+                handleAction('Error', 'Curso no encontrado o DB no conectada.');
+                cerrarModal('edicionCursoModal');
+                return;
+            }
+
+            const nuevoEstado = document.getElementById('edicionEstado').value;
+            const nuevaPublicacion = document.getElementById('edicionPublicacion').value === 'visible';
+            
+            const cursoRef = window.doc(db, COURSES_PATH, curso.id);
+
+            try {
+                await window.updateDoc(cursoRef, {
+                    estado: nuevoEstado,
+                    publicado: nuevaPublicacion
+                });
+
+                cerrarModal('edicionCursoModal');
+                // Volver al panel de gestión (la re-renderización es manejada por el listener)
+                abrirModal('gestionCursosModal');
+                
+                handleAction('Edición Exitosa', `Estado/Visibilidad de ${curso.nombre} actualizado.`);
+
+            } catch (error) {
+                console.error("Error al editar curso:", error);
+                handleAction('Error de Edición', `Fallo al actualizar ${curso.nombre}.`);
+            }
+        }
+
+
+        /**
+         * Elimina permanentemente un curso del sistema de Firestore.
+         * @param {string} id ID (Doc ID de Firestore) del curso.
+         */
+        async function eliminarCurso(id) {
+            const curso = capacitaciones.find(c => c.id === id);
+            if (curso && db) {
+                if (confirm(`¿Está seguro de eliminar el curso "${curso.nombre}"? Esta acción no se puede deshacer.`)) {
+                    try {
+                        await window.deleteDoc(window.doc(db, COURSES_PATH, id));
+                        handleAction('Curso Eliminado Permanentemente', curso.nombre);
+                        // Renders handled by onSnapshot
+                    } catch (error) {
+                        console.error("Error al eliminar curso:", error);
+                        handleAction('Error de Eliminación', `Fallo al eliminar ${curso.nombre}.`);
+                    }
+                } else {
+                    handleAction('Cancelado', `Eliminación de ${curso.nombre}`);
+                }
+            }
+        }
+        
+        // Función de confirmación segura (reemplaza window.confirm)
+        function confirm(message) {
+            return window.confirm(message);
+        }
+
+        /**
+         * Renderiza la lista de capacitaciones en el DOM.
+         */
+        function renderCapacitaciones() {
+            const container = document.getElementById('cursosContainer');
+            container.innerHTML = ''; 
+
+            // FILTRAR: Solo mostrar cursos que tengan publicado: true
+            const cursosVisibles = capacitaciones.filter(c => c.publicado);
+
+            if (cursosVisibles.length === 0) {
+                 container.innerHTML = `
+                    <div class="md:col-span-2 lg:col-span-2 text-center p-10 bg-white rounded-xl shadow-lg">
+                        <h3 class="text-2xl font-bold text-gray-700">No hay capacitaciones disponibles actualmente.</h3>
+                        <p class="text-gray-500 mt-2">Vuelve pronto o <a href="#" onclick="mostrarFormularioSugerencia()" class="text-yellow-500 font-semibold hover:underline">sugiere un tema</a>.</p>
+                    </div>
+                `;
+                 return;
+            }
+
+            cursosVisibles.forEach(curso => {
+                const cupoDisponible = curso.cupoMax - curso.cupoActual;
+                const estaLleno = cupoDisponible <= 0;
+                
+                let statusColor = '';
+                let mainButtonText = '';
+                let mainButtonClass = '';
+                let mainButtonHandler = '';
+
+                // Lógica para determinar el color y acción del botón principal según el estado Y CUPO
+                if (curso.estado === "Inscripción Abierta" && !estaLleno) {
+                    statusColor = 'bg-green-100 text-green-800';
+                    mainButtonText = 'Inscribirse';
+                    mainButtonClass = 'bg-indigo-600 hover:bg-indigo-700';
+                    mainButtonHandler = `mostrarInscripcion('${curso.id}')`;
+                } else if (curso.estado === "Inscripción Abierta" && estaLleno) {
+                    statusColor = 'bg-red-100 text-red-800'; 
+                    mainButtonText = 'Cupo Lleno';
+                    mainButtonClass = 'bg-gray-300 text-gray-600 cursor-not-allowed';
+                    mainButtonHandler = `mostrarDetalles('${curso.id}')`;
+                } else if (curso.estado === "En Curso") {
+                    statusColor = 'bg-blue-100 text-blue-800';
+                    mainButtonText = 'Ver Detalles';
+                    mainButtonClass = 'bg-blue-600 hover:bg-blue-700';
+                    mainButtonHandler = `mostrarDetalles('${curso.id}')`;
+                } else if (curso.estado === "Próximamente") {
+                    statusColor = 'bg-yellow-100 text-yellow-800';
+                    mainButtonText = 'Ver Detalles';
+                    mainButtonClass = 'bg-gray-400 hover:bg-gray-500';
+                    mainButtonHandler = `mostrarDetalles('${curso.id}')`; 
+                } else if (curso.estado === "Finalizado") {
+                    statusColor = 'bg-gray-200 text-gray-700';
+                    mainButtonText = 'Ver Material';
+                    mainButtonClass = 'bg-gray-400 hover:bg-gray-500';
+                    mainButtonHandler = `handleAction('Descargar Material', '${curso.nombre}')`; 
+                }
+
+                const displayStatus = estaLleno && curso.estado === "Inscripción Abierta" ? "Cupo Lleno" : curso.estado;
+                
+                const cupoText = estaLleno ? 
+                    '<span class="text-red-600 font-bold">AGOTADO</span>' : 
+                    `${cupoDisponible} cupos disponibles`;
+
+                const cursoHtml = `
+                    <div class="card bg-white p-6 rounded-xl border border-gray-200">
+                        <div class="flex justify-between items-start mb-4">
+                            <h2 class="text-xl font-bold text-gray-800">${curso.nombre}</h2>
+                            <span class="px-3 py-1 text-xs font-semibold rounded-full ${statusColor}">
+                                ${displayStatus}
+                            </span>
+                        </div>
+                        
+                        <p class="text-sm text-gray-600 mb-2">
+                            <strong class="text-gray-700">Área:</strong> ${curso.area}
+                        </p>
+                        <p class="text-sm text-gray-600 mb-2">
+                            <strong class="text-gray-700">Cupo:</strong> ${cupoText}
+                        </p>
+                        <p class="text-sm text-gray-600 mb-4">
+                            <strong class="text-gray-700">Instructor:</strong> ${curso.instructor}
+                        </p>
+
+                        <!-- Botones de Interés -->
+                        <div class="flex flex-wrap gap-3 mt-4 border-t pt-4">
+                            <button 
+                                onclick="${mainButtonHandler}" 
+                                class="flex-1 min-w-[120px] px-4 py-2 text-sm font-medium rounded-lg text-white ${mainButtonClass} transition duration-150 shadow-md"
+                            >
+                                ${mainButtonText}
+                            </button>
+                            <button 
+                                onclick="handleAction('Descargar Material', '${curso.nombre}')" 
+                                class="flex-1 min-w-[120px] px-4 py-2 text-sm font-medium rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition duration-150"
+                            >
+                                Descargar Material
+                            </button>
+                            <button 
+                                onclick="mostrarDetalles('${curso.id}')" 
+                                class="flex-1 min-w-[120px] px-4 py-2 text-sm font-medium rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition duration-150"
+                            >
+                                Ver Detalles
+                            </button>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += cursoHtml;
+            });
+        }
+
+        // Llamar a la función de inicialización cuando la ventana cargue
+        window.onload = initFirebaseAndAuth;
+    </script>
+</head>
+<body class="bg-gray-50 p-4 sm:p-8">
+
+    <div class="max-w-6xl mx-auto">
+        
+        <!-- Encabezado del Dashboard -->
+        <header class="mb-10 text-center">
+            <h1 class="text-4xl font-extrabold text-gray-900 mb-2">
+                Cronograma de Capacitaciones 🗓️
+            </h1>
+            <p class="text-gray-600 text-lg">
+                Explora los cursos disponibles y gestiona tu desarrollo profesional.
+            </p>
+        </header>
+
+        <!-- Mensaje de Notificación (Alert sin alert()) -->
+        <div id="messageBox" class="hidden border px-4 py-3 rounded relative mb-6 transition-opacity duration-300" role="alert">
+            <!-- El contenido del mensaje se inserta con JS -->
+        </div>
+
+        <!-- Botones de Navegación Global (Orden Modificado) -->
+        <div class="flex flex-wrap gap-4 mb-10 justify-center"> 
+            <!-- BOTONES PÚBLICOS PRIMERO -->
+            <button class="px-6 py-3 font-semibold rounded-lg btn-primary shadow-lg hover:shadow-xl transition duration-200">
+                Mi Progreso (4 Cursos)
+            </button>
+            <button 
+                onclick="mostrarCronograma()"
+                class="px-6 py-3 font-semibold rounded-lg bg-cyan-600 text-white hover:bg-cyan-700 transition duration-200 shadow-lg"
+            >
+                Ver Cronograma de Capacitaciones
+            </button>
+            <!-- BOTÓN PÚBLICO DE SUGERENCIA -->
+            <button 
+                onclick="mostrarFormularioSugerencia()"
+                class="px-6 py-3 font-semibold rounded-lg bg-yellow-500 text-white hover:bg-yellow-600 transition duration-200 shadow-lg"
+            >
+                Sugerir Capacitaciones o Charlas
+            </button>
+
+            <!-- BOTONES DE ADMINISTRACIÓN AL FINAL (CLAVE REQUERIDA) -->
+            <button 
+                onclick="solicitarClaveAdmin()"
+                class="px-6 py-3 font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition duration-200 shadow-lg"
+            >
+                Administrar Cursos (Panel Admin)
+            </button>
+            <!-- BOTÓN RESTRINGIDO PARA ADMINS (LISTA DE SUGERENCIAS) -->
+            <button 
+                onclick="solicitarClaveSugerencia()"
+                class="px-6 py-3 font-semibold rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition duration-200 shadow-lg"
+            >
+                Ver Sugerencias (Admin)
+            </button>
+        </div>
+
+        <!-- Contenedor Principal de Cursos -->
+        <div id="cursosContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
+            <!-- Las tarjetas de cursos se insertan aquí con JavaScript -->
+        </div>
+        
+    </div>
+
+    <!-- MODAL 6: CLAVE DE ACCESO PARA PANEL DE ADMINISTRACIÓN (CURSOS) -->
+    <div id="keyModalAdmin" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('keyModalAdmin')">
+        <div class="modal-content w-full max-w-sm">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Acceso Restringido (Admin Cursos)</h3>
+                <button onclick="cerrarModal('keyModalAdmin')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <form onsubmit="verificarClaveAdmin(event)" class="space-y-4">
+                <p class="text-gray-600">Introduzca la clave de administrador para acceder al panel de gestión.</p>
+                <div>
+                    <label for="adminKeyInput" class="block text-sm font-medium text-gray-700 mb-1">Clave Secreta</label>
+                    <input type="password" id="adminKeyInput" required placeholder="Clave de acceso" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500">
+                </div>
+                <!-- Mensaje de error para la clave -->
+                <p id="adminKeyErrorAdmin" class="text-sm text-red-600 hidden"></p>
+                <div class="pt-2">
+                    <button type="submit" class="w-full px-4 py-2 text-lg font-medium rounded-lg bg-red-600 text-white transition duration-150 shadow-md hover:bg-red-700">
+                        Acceder
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- FIN MODAL CLAVE DE ACCESO PARA ADMIN -->
+
+    <!-- MODAL 7: CLAVE DE ACCESO PARA LISTA DE SUGERENCIAS (ADMIN) -->
+    <div id="keyModalSugerencia" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('keyModalSugerencia')">
+        <div class="modal-content w-full max-w-sm">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Acceso a Sugerencias</h3>
+                <button onclick="cerrarModal('keyModalSugerencia')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <form onsubmit="verificarClaveSugerencia(event)" class="space-y-4">
+                <p class="text-gray-600">Introduzca la clave para ver las sugerencias de los empleados.</p>
+                <div>
+                    <label for="sugKeyInput" class="block text-sm font-medium text-gray-700 mb-1">Clave Secreta</label>
+                    <input type="password" id="sugKeyInput" required placeholder="Clave de acceso" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-yellow-500 focus:border-yellow-500">
+                </div>
+                <!-- Mensaje de error para la clave -->
+                <p id="adminKeyErrorSug" class="text-sm text-red-600 hidden"></p>
+                <div class="pt-2">
+                    <button type="submit" class="w-full px-4 py-2 text-lg font-medium rounded-lg bg-orange-500 text-white transition duration-150 shadow-md hover:bg-orange-600">
+                        Acceder a Sugerencias
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- FIN MODAL CLAVE DE ACCESO PARA SUGERENCIAS -->
+
+    <!-- MODAL 8: LISTA DE SUGERENCIAS (PANEL ADMIN) -->
+    <div id="listaSugerenciasModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('listaSugerenciasModal')">
+        <div class="modal-content max-w-2xl">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Gestión de Sugerencias de Empleados</h3>
+                <button onclick="cerrarModal('listaSugerenciasModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <p class="text-gray-600 mb-4">Revisa las propuestas de capacitación enviadas por los colaboradores.</p>
+
+            <ul id="sugerenciasList" class="bg-gray-100 rounded-lg border border-gray-200 divide-y divide-gray-200">
+                <!-- Las sugerencias se insertan aquí con JS (renderSugerencias) -->
+            </ul>
+
+            <div class="mt-6 pt-4 border-t">
+                 <p class="text-sm text-gray-500">Recuerda eliminar las sugerencias que ya no son relevantes.</p>
+            </div>
+        </div>
+    </div>
+    <!-- FIN MODAL 8 -->
+
+    <!-- MODAL 9: GESTIÓN DE CURSOS EXISTENTES (ADMIN) -->
+    <div id="gestionCursosModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('gestionCursosModal')">
+        <div class="modal-content max-w-4xl">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Gestión de Cursos del Sistema</h3>
+                <button onclick="cerrarModal('gestionCursosModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <p class="text-gray-600 mb-4">Controla el estado, la visibilidad y elimina cursos.</p>
+
+            <ul id="gestionCursosList" class="bg-gray-100 rounded-lg border border-gray-200 divide-y divide-gray-200">
+                <!-- Los cursos se insertan aquí con JS (renderGestionCursos) -->
+            </ul>
+
+            <div class="mt-6 pt-4 border-t">
+                 <button onclick="cerrarModal('gestionCursosModal'); prepareAdminForm(); abrirModal('adminModal');" class="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition duration-150 shadow-md">
+                    ← Volver a Añadir Nuevo Curso
+                </button>
+            </div>
+        </div>
+    </div>
+    <!-- FIN MODAL 9 -->
+
+    <!-- MODAL 10: EDICIÓN RÁPIDA DE CURSO (ESTADO Y VISIBILIDAD) - NUEVO -->
+    <div id="edicionCursoModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('edicionCursoModal')">
+        <div class="modal-content w-full max-w-lg">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 id="edicionCursoTitulo" class="text-2xl font-bold text-gray-900">Editar Curso</h3>
+                <button onclick="cerrarModal('edicionCursoModal'); solicitarGestionCursos();" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <form onsubmit="handleGuardarEdicion(event)" class="space-y-4">
+                <p class="text-gray-600">Ajusta el estado actual de la capacitación y su visibilidad en el catálogo público.</p>
+                
+                <!-- Selector de ESTADO -->
+                <div>
+                    <label for="edicionEstado" class="block text-sm font-medium text-gray-700 mb-1">Estado de la Capacitación</label>
+                    <select id="edicionEstado" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                        <option value="Próximamente">Próximamente</option>
+                        <option value="Inscripción Abierta">Inscripción Abierta</option>
+                        <option value="En Curso">En Curso</option>
+                        <option value="Finalizado">Finalizado</option>
+                    </select>
+                </div>
+
+                <!-- Selector de VISIBILIDAD -->
+                <div>
+                    <label for="edicionPublicacion" class="block text-sm font-medium text-gray-700 mb-1">Visibilidad en el Catálogo</label>
+                    <select id="edicionPublicacion" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                        <option value="visible">Visible (Se muestra al público)</option>
+                        <option value="oculto">Oculto (Solo visible para Administrador)</option>
+                    </select>
+                </div>
+
+                <div class="pt-2 flex gap-3">
+                    <button type="button" onclick="cerrarModal('edicionCursoModal'); solicitarGestionCursos();" class="flex-1 px-4 py-2 text-lg font-medium rounded-lg bg-gray-300 text-gray-700 transition duration-150 hover:bg-gray-400">
+                        Cancelar
+                    </button>
+                    <button type="submit" class="flex-1 px-4 py-2 text-lg font-medium rounded-lg bg-blue-600 text-white transition duration-150 shadow-md hover:bg-blue-700">
+                        Guardar Cambios
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- FIN MODAL 10 -->
+
+    <!-- MODAL 1: DETALLES DEL CURSO -->
+    <div id="detallesModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('detallesModal')">
+        <div class="modal-content">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 id="modalTitulo" class="text-2xl font-bold text-gray-900">Título del Curso</h3>
+                <button onclick="cerrarModal('detallesModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <div class="space-y-4">
+                <p class="text-gray-700 leading-relaxed" id="modalDescripcion">Descripción detallada del curso...</p>
+                
+                <div class="grid grid-cols-2 gap-4 border-t pt-4">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">Área</p>
+                        <p class="font-semibold text-gray-800" id="modalArea">Área</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">Duración</p>
+                        <p class="font-semibold text-gray-800" id="modalDuracion">Duración</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">Instructor</p>
+                        <p class="font-semibold text-gray-800" id="modalInstructor">Instructor</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">Fecha de Inicio</p>
+                        <p class="font-semibold text-gray-800" id="modalFechaInicio">Fecha</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">Cupo Total</p>
+                        <p class="font-semibold text-gray-800" id="modalCupoTotal">Total</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">Cupos Disponibles</p>
+                        <p class="font-semibold text-gray-800" id="modalCupoDisponible">Disponible</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Botón de Acción del Modal - ABRE EL MODAL DE INSCRIPCIÓN -->
+            <div class="mt-6 pt-4 border-t">
+                <button id="inscModalBtn" 
+                    class="w-full px-4 py-2 text-lg font-medium rounded-lg btn-primary transition duration-150 shadow-md"
+                >
+                    Inscribirse Ahora
+                </button>
+            </div>
+        </div>
+    </div>
+    <!-- FIN MODAL 1 -->
+
+    <!-- MODAL 2: FORMULARIO DE INSCRIPCIÓN -->
+    <div id="inscripcionModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('inscripcionModal')">
+        <div class="modal-content">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Formulario de Inscripción</h3>
+                <button onclick="cerrarModal('inscripcionModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <form onsubmit="handleSubmitInscripcion(event)" class="space-y-4">
+                <div>
+                    <label for="nombreInput" class="block text-sm font-medium text-gray-700 mb-1">Nombre Completo</label>
+                    <input type="text" id="nombreInput" required placeholder="Ej: Juan Pérez" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div>
+                    <label for="cedulaInput" class="block text-sm font-medium text-gray-700 mb-1">Cédula / Identificación</label>
+                    <input type="text" id="cedulaInput" required placeholder="Ej: 8-888-888" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div>
+                    <label for="cursoSelect" class="block text-sm font-medium text-gray-700 mb-1">Seleccionar Curso</label>
+                    <select id="cursoSelect" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
+                        <!-- Opciones cargadas por JS (solo cursos con cupo disponible) -->
+                    </select>
+                </div>
+                <div class="pt-2">
+                    <button type="submit" class="w-full px-4 py-2 text-lg font-medium rounded-lg btn-primary transition duration-150 shadow-md">
+                        Confirmar Inscripción
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- FIN MODAL 2 -->
+
+    <!-- MODAL 3: CRONOGRAMA DE CAPACITACIONES -->
+    <div id="cronogramaModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('cronogramaModal')">
+        <div class="modal-content max-w-4xl">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Cronograma de Capacitaciones</h3>
+                <button onclick="cerrarModal('cronogramaModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200 schedule-table">
+                    <thead>
+                        <tr class="bg-gray-50">
+                            <th class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Curso</th>
+                            <th class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Horario</th>
+                            <th class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Inicio</th>
+                            <th class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Instructor</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cronogramaBody" class="bg-white divide-y divide-gray-200">
+                        <!-- Filas de cursos insertadas por JS -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-6 pt-4 border-t">
+                 <p class="text-sm text-gray-500">Nota: Los horarios están sujetos a cambios. Consulta la descripción del curso para más detalles.</p>
+            </div>
+        </div>
+    </div>
+    <!-- FIN MODAL 3 -->
+
+    <!-- MODAL 4: SUGERIR NUEVA CAPACITACIÓN (PÚBLICO) -->
+    <div id="sugerenciaModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('sugerenciaModal')">
+        <div class="modal-content">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Sugerir un Tema de Interés</h3>
+                <button onclick="cerrarModal('sugerenciaModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <form onsubmit="handleSubmitSugerencia(event)" class="space-y-4">
+                <p class="text-gray-600">¿Qué tipo de capacitación o tema te gustaría ver en nuestro catálogo?</p>
+                <div>
+                    <label for="sugerenciaTema" class="block text-sm font-medium text-gray-700 mb-1">Tema sugerido:</label>
+                    <textarea id="sugerenciaTema" rows="4" required placeholder="Ej: Curso avanzado de Google Sheets, Taller de manejo de estrés laboral..." 
+                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                </div>
+                <div class="pt-2">
+                    <button type="submit" class="w-full px-4 py-2 text-lg font-medium rounded-lg bg-yellow-500 text-white transition duration-150 shadow-md hover:bg-yellow-600">
+                        Enviar Sugerencia
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- FIN MODAL 4 -->
+
+    <!-- MODAL 5: PANEL DE ADMINISTRACIÓN (CURSOS) -->
+    <div id="adminModal" class="modal-overlay hidden" onclick="if (event.target === this) cerrarModal('adminModal')">
+        <div class="modal-content max-w-4xl">
+            <div class="flex justify-between items-start border-b pb-3 mb-4">
+                <h3 class="text-2xl font-bold text-gray-900">Gestión de Cursos</h3>
+                <button onclick="cerrarModal('adminModal')" class="text-gray-400 hover:text-gray-600 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Botón para ir al sub-modal de gestión -->
+            <div class="mb-6 pb-4 border-b flex justify-between items-center">
+                <h4 class="text-xl font-semibold text-gray-700">Añadir Nuevo Curso</h4>
+                 <button onclick="solicitarGestionCursos();" class="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white transition duration-150 shadow-md hover:bg-indigo-700">
+                    Gestionar Cursos Existentes →
+                </button>
+            </div>
+            
+            <form id="nuevoCursoForm" onsubmit="handleSubmitNuevoCurso(event)" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- Columna 1 -->
+                <div class="space-y-4">
+                    <div>
+                        <label for="nuevoNombre" class="block text-sm font-medium text-gray-700 mb-1">Nombre del Curso</label>
+                        <input type="text" id="nuevoNombre" required placeholder="Ej: Fundamentos de Scrum" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div>
+                        <label for="nuevoArea" class="block text-sm font-medium text-gray-700 mb-1">Área / Categoría</label>
+                        <input type="text" id="nuevoArea" required placeholder="Ej: Metodologías Ágiles" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div>
+                        <label for="nuevoDuracion" class="block text-sm font-medium text-gray-700 mb-1">Duración (minutos)</label>
+                        <input type="number" id="nuevoDuracion" required value="120" min="10" placeholder="Ej: 120 (2 horas)" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div>
+                        <label for="nuevoInstructor" class="block text-sm font-medium text-gray-700 mb-1">Instructor</label>
+                        <input type="text" id="nuevoInstructor" required placeholder="Ej: Dra. Laura Sánchez" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                </div>
+
+                <!-- Columna 2 - Se han añadido/modificado los campos de Fecha y Hora -->
+                <div class="space-y-4">
+                     <!-- CAMPOS DE CUPO EN ADMIN -->
+                    <div>
+                        <label for="nuevoCupoMax" class="block text-sm font-medium text-gray-700 mb-1">Cupo Máximo</label>
+                        <input type="number" id="nuevoCupoMax" required value="20" min="1" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div>
+                        <label for="nuevoCupoActual" class="block text-sm font-medium text-gray-700 mb-1">Inscritos Actualmente</label>
+                        <input type="number" id="nuevoCupoActual" required value="0" min="0" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    
+                    <!-- NUEVOS CAMPOS: Fecha y Hora de Inicio -->
+                    <div>
+                        <label for="nuevoFechaInicio" class="block text-sm font-medium text-gray-700 mb-1">Fecha de Inicio (Día)</label>
+                        <!-- Se inicializa con JS al abrir el modal -->
+                        <input type="date" id="nuevoFechaInicio" required class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    </div>
+                    <div class="flex gap-4">
+                        <div class="flex-1">
+                            <label for="nuevoHoraInicio" class="block text-sm font-medium text-gray-700 mb-1">Hora de Inicio</label>
+                            <!-- Se inicializa con JS al abrir el modal -->
+                            <input type="time" id="nuevoHoraInicio" required class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                        </div>
+                        <div class="flex-1">
+                            <label for="nuevaFrecuencia" class="block text-sm font-medium text-gray-700 mb-1">Días/Frecuencia</label>
+                            <input type="text" id="nuevaFrecuencia" required placeholder="Ej: L, M y V" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                        </div>
+                    </div>
+                </div>
+                
+                 <!-- Campo de Descripción Detallada (Abarca ambas columnas) -->
+                <div class="md:col-span-2 space-y-4">
+                    <label for="nuevoDescripcion" class="block text-sm font-medium text-gray-700 mb-1">Descripción Detallada</label>
+                    <textarea id="nuevoDescripcion" rows="3" required placeholder="Describa el objetivo y contenido del curso..." class="w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea>
+                </div>
+                
+                <!-- ESTADO Y VISIBILIDAD INICIAL -->
+                <div class="md:col-span-2 space-y-4 pt-2 flex gap-4">
+                    <div class="flex-1">
+                        <label for="nuevoEstado" class="block text-sm font-medium text-gray-700 mb-1">Estado de la Capacitación</label>
+                        <select id="nuevoEstado" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500">
+                            <option value="Próximamente">Próximamente</option>
+                            <option value="Inscripción Abierta">Inscripción Abierta</option>
+                            <option value="En Curso">En Curso</option>
+                            <option value="Finalizado">Finalizado</option>
+                        </select>
+                    </div>
+                    <div class="flex-1">
+                        <label for="nuevoPublicacion" class="block text-sm font-medium text-gray-700 mb-1">Visibilidad Inicial</label>
+                        <select id="nuevoPublicacion" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500">
+                            <option value="visible">Visible en el Catálogo</option>
+                            <option value="oculto">Oculto (Solo en Administración)</option>
+                        </select>
+                    </div>
+                </div>
+
+
+                <!-- Botón de Envío (abarca ambas columnas) -->
+                <div class="md:col-span-2 pt-4 border-t">
+                    <button type="submit" class="w-full px-4 py-2 text-lg font-medium rounded-lg bg-red-600 text-white transition duration-150 shadow-md hover:bg-red-700">
+                        Guardar Nuevo Curso en Catálogo
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- FIN MODAL 5 -->
+
+</body>
+</html>
